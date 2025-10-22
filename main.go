@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sync"
 )
 
@@ -33,13 +34,14 @@ func (q *Queue) dequeue() string {
 }
 
 type Crawler interface {
-	Crawl() error
+	Crawl(s *Set) error
+	Crawled(url string) bool
 }
 
-func (q *Queue) Crawl() error {
-	u := q.dequeue()
-	fmt.Printf("dequeue and crawl: %s\n", u)
-	res, err := http.Get(u)
+func (q *Queue) Crawl(s *Set) error {
+	url := q.dequeue()
+	fmt.Printf("dequeue and crawl: %s\n", url)
+	res, err := http.Get(url)
 	if err != nil {
 		return fmt.Errorf("error fetching this url: %v", err)
 	}
@@ -49,14 +51,49 @@ func (q *Queue) Crawl() error {
 		return fmt.Errorf("recieved a non-OK HTTP status: %d %s", res.StatusCode, res.Status)
 	}
 
-	body, err := io.ReadAll(res.Body)
+	const byteLimit = 50000
+	body, err := io.ReadAll(io.LimitReader(res.Body, int64(byteLimit)))
 	if err != nil {
 		return fmt.Errorf("error reading response body: %v", err)
 	}
 
-	fmt.Println("Body: ", string(body))
+	s.SetAsCrawled(url)
+	bodyStr := string(body)
+	regx := regexp.MustCompile(`https?://[^\s"'<>]+`)
+
+	matches := regx.FindAllStringSubmatch(bodyStr, -1)
+	for _, match := range matches {
+		url := match[0]
+		fmt.Println("Match: ", url)
+	}
 
 	return nil
+}
+
+type Set struct {
+	elements map[string]bool
+	count    int
+	rwmu     sync.RWMutex
+	mu       sync.Mutex
+}
+
+func (s *Set) IsCrawled(url string) bool {
+	s.rwmu.RLock()
+	defer s.rwmu.RUnlock()
+	return s.elements[url]
+}
+
+func (s *Set) SetAsCrawled(url string) {
+	s.mu.Lock()
+	if s.IsCrawled(url) {
+		s.mu.Unlock()
+		return
+	}
+	fmt.Println("Passed the isCrawled check")
+
+	s.count++
+	s.elements[url] = true
+	s.mu.Unlock()
 }
 
 func main() {
@@ -74,10 +111,11 @@ func main() {
 	}
 
 	urlQueue := Queue{elements: []string{}, count: 0}
-	urlQueue.enqueue(link)
+	crawledUrls := Set{elements: make(map[string]bool), count: 0}
 
-	err := urlQueue.Crawl()
+	urlQueue.enqueue(link)
+	err := urlQueue.Crawl(&crawledUrls)
 	if err != nil {
-		fmt.Fprintf(os.Stdout, "Error crawling %s", link)
+		fmt.Fprintf(os.Stdout, "Error crawling %s %s\n", link, err)
 	}
 }
