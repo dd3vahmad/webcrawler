@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"sync"
+	"github.com/PuerkitoBio/goquery"
 )
 
 type Queue struct {
@@ -48,17 +49,25 @@ func (q *Queue) Crawl(s *Set) error {
 		if err != nil {
 			continue
 		}
+
 		if res.StatusCode != http.StatusOK {
 			res.Body.Close()
 			continue
 		}
 
 		body, err := io.ReadAll(io.LimitReader(res.Body, 50000))
-		res.Body.Close()
 		if err != nil {
 			continue
 		}
 
+		doc, err := goquery.NewDocumentFromReader(res.Body)
+		if err != nil {
+			fmt.Println("Oops an error occurred %v\n", err)
+			continue
+		}
+		title := doc.Find("title").Text()
+		res.Body.Close()
+		
 		regx := regexp.MustCompile(`https?://[^\s"'<>]+`)
 		links := regx.FindAllString(string(body), -1)
 
@@ -68,7 +77,7 @@ func (q *Queue) Crawl(s *Set) error {
 			}
 			s.SetAsCrawled(link)
 			q.enqueue(link)
-			fmt.Printf("Count: %d | %s\n", q.total, link)
+			fmt.Printf("Count: %d | %s -> %s\n", q.total, link, title)
 		}
 	}
 	return nil
@@ -117,6 +126,7 @@ func main() {
 	urlQueue.enqueue(link)
 	err := urlQueue.Crawl(&crawledUrls)
 
+	fmt.Println("\n")
 	fmt.Println("------------Crawler Stats------------")
 	queuedTotal := urlQueue.total
 	queuedCount := urlQueue.count
