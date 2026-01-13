@@ -13,12 +13,14 @@ import (
 type Queue struct {
 	elements []string
 	count    int
+	total    int
 	mu       sync.Mutex
 }
 
 func (q *Queue) enqueue(u string) {
 	q.mu.Lock()
 	q.count++
+	q.total++
 	q.elements = append(q.elements, u)
 	q.mu.Unlock()
 }
@@ -35,65 +37,64 @@ func (q *Queue) dequeue() string {
 
 type Crawler interface {
 	Crawl(s *Set) error
-	Crawled(url string) bool
+	IsCrawled(url string) bool
 }
 
 func (q *Queue) Crawl(s *Set) error {
-	url := q.dequeue()
-	fmt.Printf("dequeue and crawl: %s\n", url)
-	res, err := http.Get(url)
-	if err != nil {
-		return fmt.Errorf("error fetching this url: %v", err)
+	for q.count > 0 && s.count < 500 {
+		current := q.dequeue()
+
+		res, err := http.Get(current)
+		if err != nil {
+			continue
+		}
+		if res.StatusCode != http.StatusOK {
+			res.Body.Close()
+			continue
+		}
+
+		body, err := io.ReadAll(io.LimitReader(res.Body, 50000))
+		res.Body.Close()
+		if err != nil {
+			continue
+		}
+
+		regx := regexp.MustCompile(`https?://[^\s"'<>]+`)
+		links := regx.FindAllString(string(body), -1)
+
+		for _, link := range links {
+			if s.IsCrawled(link) {
+				continue
+			}
+			s.SetAsCrawled(link)
+			q.enqueue(link)
+			fmt.Printf("Count: %d | %s\n", q.total, link)
+		}
 	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("recieved a non-OK HTTP status: %d %s", res.StatusCode, res.Status)
-	}
-
-	const byteLimit = 50000
-	body, err := io.ReadAll(io.LimitReader(res.Body, int64(byteLimit)))
-	if err != nil {
-		return fmt.Errorf("error reading response body: %v", err)
-	}
-
-	s.SetAsCrawled(url)
-	bodyStr := string(body)
-	regx := regexp.MustCompile(`https?://[^\s"'<>]+`)
-
-	matches := regx.FindAllStringSubmatch(bodyStr, -1)
-	for _, match := range matches {
-		url := match[0]
-		fmt.Println("Match: ", url)
-	}
-
 	return nil
 }
 
 type Set struct {
 	elements map[string]bool
 	count    int
-	rwmu     sync.RWMutex
 	mu       sync.Mutex
 }
 
 func (s *Set) IsCrawled(url string) bool {
-	s.rwmu.RLock()
-	defer s.rwmu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.elements[url]
 }
 
 func (s *Set) SetAsCrawled(url string) {
 	s.mu.Lock()
-	if s.IsCrawled(url) {
-		s.mu.Unlock()
+	defer s.mu.Unlock()
+
+	if s.elements[url] {
 		return
 	}
-	fmt.Println("Passed the isCrawled check")
-
-	s.count++
 	s.elements[url] = true
-	s.mu.Unlock()
+	s.count++
 }
 
 func main() {
@@ -110,11 +111,20 @@ func main() {
 		return
 	}
 
-	urlQueue := Queue{elements: []string{}, count: 0}
+	urlQueue := Queue{elements: []string{}, count: 0, total: 0}
 	crawledUrls := Set{elements: make(map[string]bool), count: 0}
 
 	urlQueue.enqueue(link)
 	err := urlQueue.Crawl(&crawledUrls)
+
+	fmt.Println("------------Crawler Stats------------")
+	queuedTotal := urlQueue.total
+	queuedCount := urlQueue.count
+	crawledCount := crawledUrls.count
+	fmt.Printf(">> Total queued: %d\n", queuedTotal)
+	fmt.Printf(">> To be crawled (Queue): %d\n", queuedCount)
+	fmt.Printf(">> Crawled: %d\n", crawledCount)
+
 	if err != nil {
 		fmt.Fprintf(os.Stdout, "Error crawling %s %s\n", link, err)
 	}
